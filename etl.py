@@ -1,5 +1,6 @@
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as func
+from pyspark.sql.window import Window
 import findspark
 
 findspark.init()
@@ -36,7 +37,7 @@ def log_data(df, output, spark):
     df_time = df_time.withColumn("weekday", func.dayofweek(df_time.start_time))
     df_time = df_time.select("start_time", "hour", "day", "week", "month", "year", "weekday")
 
-    # df_time.write.mode("overwrite").partitionBy("year", "month").parquet(output + "time")
+    df_time.write.mode("overwrite").partitionBy("year", "month").parquet(output + "time")
 
     # create user dataframe and write to parquet file
     df_user = df.select(func.col("userId").alias("user_id"),
@@ -45,15 +46,31 @@ def log_data(df, output, spark):
                         func.col("gender"),
                         func.col("level")).distinct()
 
-    song_parquet = output + "songs"
+    df_user.write.mode("overwrite").parquet(output + "user")
 
-    songs = spark.read.parquet(song_parquet)
+    # create songplay dataframe and write to parquet file
 
-    songs.where(songs.year != 0).show(n=15)
+    song_dir = "data/song_data/*/*/*/*.json"
 
-    df.join(songs, [df.artist_id == songs.artist_id, df.song_id == songs.song_id]).show()
+    songs = spark.read.json(song_dir)
 
-    # df_user.write.mode("overwrite").parquet(output + "user")
+    df_songplay = df.join(songs, [df.artist == songs.artist_name, df.song == songs.title, df.length == songs.duration],
+                          "inner")
+
+    df_songplay = df_songplay.withColumn("start_time", (func.col("ts") / 1000).cast("timestamp"))
+
+    # Generating sequential id for table
+    df_songplay = df_songplay.withColumn("id", func.monotonically_increasing_id())
+    df_songplay = df_songplay.withColumn("songplay_id", func.row_number().over(Window.orderBy("id")))
+
+    # select necessary columns
+    df_songplay = df_songplay.select("songplay_id", "start_time", func.col("userId").alias("user_id"),
+                                     "level", "song_id", "artist_id",
+                                     func.col("sessionId").alias("session_id"),
+                                     "location",
+                                     func.col("userAgent").alias("user_agent"))
+
+    df_songplay.write.mode("overwrite").parquet(output + "songplay")
 
 
 def main():
@@ -67,12 +84,8 @@ def main():
     df_song_data = spark.read.json(input_dir_song_data)
     df_log_data = spark.read.json(input_dir_log_data)
 
-    # song_data(df_song_data, output_dir)
+    song_data(df_song_data, output_dir)
     log_data(df_log_data, output_dir, spark)
-
-    df_log_data.printSchema()
-    # df_song_data.show()
-    # user_df = df_song.select(func.col())
 
 
 if __name__ == "__main__":
